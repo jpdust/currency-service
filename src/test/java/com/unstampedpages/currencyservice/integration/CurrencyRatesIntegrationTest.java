@@ -27,16 +27,11 @@ import static com.github.tomakehurst.wiremock.core.WireMockConfiguration.wireMoc
 class CurrencyRatesIntegrationTest {
 
     private static final String MOCK_RATES_JSON = """
-            {
-              "success": true,
-              "source": "USD",
-              "date": "2024-11-15",
-              "rates": {
-                "EUR": 0.9235,
-                "GBP": 0.7885,
-                "JPY": 154.32
-              }
-            }
+            [
+              {"rate": 0.9235, "source": "USD", "target": "EUR", "time": "2026-06-09T04:33:00+0000"},
+              {"rate": 0.7885, "source": "USD", "target": "GBP", "time": "2026-06-09T04:33:00+0000"},
+              {"rate": 154.32, "source": "USD", "target": "JPY", "time": "2026-06-09T04:33:00+0000"}
+            ]
             """;
 
     @RegisterExtension
@@ -82,7 +77,7 @@ class CurrencyRatesIntegrationTest {
                 .expectStatus().isOk()
                 .expectBody()
                 .jsonPath("$.source").isEqualTo("USD")
-                .jsonPath("$.rates.EUR").isEqualTo(0.9235);
+                .jsonPath("$.rates.EUR").isEqualTo(0.9235f);
     }
 
     @Test
@@ -127,6 +122,6 @@ class CurrencyRatesIntegrationTest {
 
         wireMock.verify(getRequestedFor(urlPathEqualTo("/api/v1/rates"))
                 .withQueryParam("source", equalTo("USD"))
-                .withQueryParam("apikey", equalTo("integration-test-key")));
+                .withHeader("Authorization", equalTo("Bearer integration-test-key")));
     }
 }
