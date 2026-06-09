@@ -1,0 +1,36 @@
+# Local configuration (contains secrets/env-specific values)
+local.properties
+
+# macOS
+.DS_Store
+**/.DS_Store
+
+# Gradle build output
+build/
+.gradle/
+
+# IntelliJ IDEA
+.idea/
+*.iml
+*.ipr
+*.iws
+out/
+
+# Eclipse
+.classpath
+.project
+.settings/
+
+# VS Code
+.vscode/
+
+# Spring Boot devtools
+.spring-boot-devtools.properties
+
+# Compiled class files
+*.class
+
+# JAR/WAR artifacts
+*.jar
+*.war
+*.ear

@@ -1,0 +1,180 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  CloudFront distribution for the Currency Rate Service.
+  Caches GET /api/rates responses from an API Gateway origin with a
+  minimum TTL of 300 s and a maximum TTL of 86 400 s (24 h).
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Parameters
+# ─────────────────────────────────────────────────────────────────────────────
+Parameters:
+
+  ApiGatewayDomainName:
+    Type: String
+    Description: >
+      API Gateway execute-API hostname, e.g.
+      abc123def.execute-api.us-east-1.amazonaws.com
+    AllowedPattern: "^[a-z0-9]+\\.execute-api\\.[a-z0-9-]+\\.amazonaws\\.com$"
+    ConstraintDescription: Must be a valid API Gateway domain name.
+
+  ApiGatewayStageName:
+    Type: String
+    Default: prod
+    Description: API Gateway stage name. Used as the CloudFront origin path prefix.
+    AllowedPattern: "^[a-zA-Z0-9_-]+$"
+
+  PriceClass:
+    Type: String
+    Default: PriceClass_100
+    AllowedValues:
+      - PriceClass_100   # North America + Europe (lowest cost)
+      - PriceClass_200   # + Asia, Middle East, Africa
+      - PriceClass_All   # All edge locations (highest availability)
+    Description: CloudFront price class governing which edge locations serve traffic.
+
+  LogBucketName:
+    Type: String
+    Default: ""
+    Description: >
+      (Optional) S3 bucket name for CloudFront access logs.
+      Leave blank to disable access logging.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Conditions
+# ─────────────────────────────────────────────────────────────────────────────
+Conditions:
+  EnableLogging: !Not [!Equals [!Ref LogBucketName, ""]]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Resources
+# ─────────────────────────────────────────────────────────────────────────────
+Resources:
+
+  # ── Cache Policy ─────────────────────────────────────────────────────────
+  CurrencyRatesCachePolicy:
+    Type: AWS::CloudFront::CachePolicy
+    Properties:
+      CachePolicyConfig:
+        Name: !Sub "${AWS::StackName}-CurrencyRatesCachePolicy"
+        Comment: >
+          Cache policy for GET /api/rates.
+          MinTTL=300s enforces caching even if the origin omits Cache-Control.
+          MaxTTL=86400s (24 h) caps stale-while-revalidate scenarios.
+          Cache key is path-only — no query strings, cookies, or custom headers.
+        DefaultTTL: 300    # Used when origin does not send Cache-Control
+        MinTTL: 300        # CloudFront will not cache for less than 5 minutes
+        MaxTTL: 86400      # Hard ceiling: 24 hours
+        ParametersInCacheKeyAndForwardedToOrigin:
+          # Compress at the edge to reduce byte counts between CloudFront and viewers
+          EnableAcceptEncodingGzip: true
+          EnableAcceptEncodingBrotli: true
+          # Exclude all headers from the cache key (the rates response is identical
+          # for every caller — no personalisation)
+          HeadersConfig:
+            HeaderBehavior: none
+          # No cookies involved in this API
+          CookiesConfig:
+            CookieBehavior: none
+          # The apikey and source params are fixed server-side; excluding them from
+          # the cache key means CloudFront serves one cached object for all viewers.
+          QueryStringsConfig:
+            QueryStringBehavior: none
+
+  # ── Origin Request Policy ─────────────────────────────────────────────────
+  # Forward the Host header so API Gateway can route to the correct API.
+  # All other headers and query strings are stripped — they should not reach
+  # the origin and must not be leaked in cache keys.
+  CurrencyRatesOriginRequestPolicy:
+    Type: AWS::CloudFront::OriginRequestPolicy
+    Properties:
+      OriginRequestPolicyConfig:
+        Name: !Sub "${AWS::StackName}-CurrencyRatesOriginRequestPolicy"
+        Comment: "Forward Host header only; strip everything else."
+        HeadersConfig:
+          HeaderBehavior: whitelist
+          Headers:
+            - Host
+        CookiesConfig:
+          CookieBehavior: none
+        QueryStringsConfig:
+          QueryStringBehavior: none
+
+  # ── CloudFront Distribution ───────────────────────────────────────────────
+  CurrencyRatesDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      Tags:
+        - Key: Project
+          Value: currency-service
+        - Key: ManagedBy
+          Value: CloudFormation
+      DistributionConfig:
+        Comment: !Sub "${AWS::StackName} — Currency Rates CDN"
+        Enabled: true
+        HttpVersion: http2and3
+        IPV6Enabled: true
+        PriceClass: !Ref PriceClass
+
+        # ── Access logging (optional) ───────────────────────────────────────
+        Logging: !If
+          - EnableLogging
+          - Bucket: !Sub "${LogBucketName}.s3.amazonaws.com"
+            IncludeCookies: false
+            Prefix: !Sub "cloudfront/${AWS::StackName}/"
+          - !Ref AWS::NoValue
+
+        # ── Origin: API Gateway ─────────────────────────────────────────────
+        Origins:
+          - Id: ApiGatewayOrigin
+            DomainName: !Ref ApiGatewayDomainName
+            # Prepend the stage name so requests reach the correct API Gateway stage.
+            # Example: /prod → API Gateway routes to the "prod" stage.
+            OriginPath: !Sub "/${ApiGatewayStageName}"
+            CustomOriginConfig:
+              HTTPSPort: 443
+              OriginProtocolPolicy: https-only   # Never allow plaintext to origin
+              OriginSSLProtocols:
+                - TLSv1.2
+              OriginReadTimeout: 30              # seconds; keep below API GW 29s limit
+              OriginKeepaliveTimeout: 5
+
+        # ── Default Cache Behaviour ─────────────────────────────────────────
+        # Handles all requests (there is only one endpoint: GET /api/rates).
+        # Add path-specific CacheBehaviors here if additional endpoints are
+        # added with different caching requirements.
+        DefaultCacheBehavior:
+          TargetOriginId: ApiGatewayOrigin
+          # Redirect HTTP → HTTPS; CloudFront never serves over plaintext.
+          ViewerProtocolPolicy: redirect-to-https
+          CachePolicyId: !Ref CurrencyRatesCachePolicy
+          OriginRequestPolicyId: !Ref CurrencyRatesOriginRequestPolicy
+          # GET and HEAD only — this is a read-only rates API.
+          AllowedMethods:
+            - GET
+            - HEAD
+          CachedMethods:
+            - GET
+            - HEAD
+          Compress: true   # Brotli/gzip at the edge — reduces egress costs
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Outputs
+# ─────────────────────────────────────────────────────────────────────────────
+Outputs:
+
+  DistributionId:
+    Description: CloudFront distribution ID (use with aws cloudfront create-invalidation)
+    Value: !Ref CurrencyRatesDistribution
+    Export:
+      Name: !Sub "${AWS::StackName}-DistributionId"
+
+  DistributionDomainName:
+    Description: >
+      CloudFront domain name. CNAME your custom domain to this value in Route 53.
+    Value: !GetAtt CurrencyRatesDistribution.DomainName
+    Export:
+      Name: !Sub "${AWS::StackName}-DistributionDomainName"
+
+  CurrencyRatesEndpoint:
+    Description: Direct URL to the cached currency rates endpoint via CloudFront.
+    Value: !Sub "https://${CurrencyRatesDistribution.DomainName}/api/rates"
