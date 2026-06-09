@@ -1,9 +1,12 @@
 package com.unstampedpages.currencyservice.integration;
 
 import com.github.tomakehurst.wiremock.junit5.WireMockExtension;
+import com.unstampedpages.currencyservice.controller.CurrencyController;
+import com.unstampedpages.currencyservice.service.RatesCache;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.http.HttpHeaders;
@@ -53,10 +56,14 @@ class CurrencyRatesIntegrationTest {
     @LocalServerPort
     private int port;
 
+    @Autowired
+    private RatesCache ratesCache;
+
     private RestTestClient restTestClient;
 
     @BeforeEach
     void setUp() {
+        ratesCache.clear();
         restTestClient = RestTestClient.bindToServer()
                 .baseUrl("http://localhost:" + port)
                 .build();
@@ -81,7 +88,7 @@ class CurrencyRatesIntegrationTest {
     }
 
     @Test
-    void getRates_includesCacheControlMaxAge300() {
+    void getRates_includesCacheControlHeader() {
         wireMock.stubFor(
                 get(urlPathEqualTo("/api/v1/rates"))
                         .willReturn(aResponse()
@@ -93,11 +100,11 @@ class CurrencyRatesIntegrationTest {
         restTestClient.get().uri("/api/rates")
                 .exchange()
                 .expectStatus().isOk()
-                .expectHeader().valueEquals(HttpHeaders.CACHE_CONTROL, "public, max-age=300");
+                .expectHeader().valueEquals(HttpHeaders.CACHE_CONTROL, "public, max-age=300, stale-if-error=86400");
     }
 
     @Test
-    void getRates_returns503WhenUpstreamFails() {
+    void getRates_returns503WhenUpstreamFailsAndCacheEmpty() {
         wireMock.stubFor(
                 get(urlPathEqualTo("/api/v1/rates"))
                         .willReturn(aResponse().withStatus(500))
@@ -109,7 +116,7 @@ class CurrencyRatesIntegrationTest {
     }
 
     @Test
-    void getRates_forwardsApiKeyAndSourceToUpstream() {
+    void getRates_forwardsSourceAndAuthorizationToUpstream() {
         wireMock.stubFor(
                 get(urlPathEqualTo("/api/v1/rates"))
                         .willReturn(aResponse()
@@ -123,5 +130,30 @@ class CurrencyRatesIntegrationTest {
         wireMock.verify(getRequestedFor(urlPathEqualTo("/api/v1/rates"))
                 .withQueryParam("source", equalTo("USD"))
                 .withHeader("Authorization", equalTo("Bearer integration-test-key")));
+    }
+
+    @Test
+    void getRates_returnsStaleRatesWithHeaderWhenUpstreamFailsAndCachePopulated() {
+        wireMock.stubFor(
+                get(urlPathEqualTo("/api/v1/rates"))
+                        .willReturn(aResponse()
+                                .withStatus(200)
+                                .withHeader("Content-Type", MediaType.APPLICATION_JSON_VALUE)
+                                .withBody(MOCK_RATES_JSON))
+        );
+        restTestClient.get().uri("/api/rates").exchange(); // populate cache
+
+        wireMock.resetAll();
+        wireMock.stubFor(
+                get(urlPathEqualTo("/api/v1/rates"))
+                        .willReturn(aResponse().withStatus(500))
+        );
+
+        restTestClient.get().uri("/api/rates")
+                .exchange()
+                .expectStatus().isOk()
+                .expectHeader().valueEquals(CurrencyController.HEADER_RATES_STALE, "true")
+                .expectBody()
+                .jsonPath("$.rates.EUR").isEqualTo(0.9235f);
     }
 }

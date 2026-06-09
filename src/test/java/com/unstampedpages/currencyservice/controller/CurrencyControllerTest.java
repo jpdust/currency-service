@@ -2,6 +2,7 @@ package com.unstampedpages.currencyservice.controller;
 
 import com.unstampedpages.currencyservice.exception.ExternalApiException;
 import com.unstampedpages.currencyservice.model.CurrencyRatesResponse;
+import com.unstampedpages.currencyservice.model.RatesFetchResult;
 import com.unstampedpages.currencyservice.service.CurrencyService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -45,7 +46,7 @@ class CurrencyControllerTest {
     private static final CurrencyRatesResponse SAMPLE_RESPONSE = new CurrencyRatesResponse(
             true,
             "USD",
-            "2024-11-15",
+            "2026-06-09T04:33:00+0000",
             Map.of(
                     "EUR", new BigDecimal("0.9235"),
                     "GBP", new BigDecimal("0.7885"),
@@ -60,7 +61,7 @@ class CurrencyControllerTest {
 
     @Test
     void getRates_returns200WithRatesBody() {
-        when(currencyService.fetchRates()).thenReturn(SAMPLE_RESPONSE);
+        when(currencyService.fetchRates()).thenReturn(new RatesFetchResult(SAMPLE_RESPONSE, false));
 
         restTestClient.get().uri("/api/rates")
                 .exchange()
@@ -68,21 +69,41 @@ class CurrencyControllerTest {
                 .expectBody()
                 .jsonPath("$.source").isEqualTo("USD")
                 .jsonPath("$.success").isEqualTo(true)
-                .jsonPath("$.rates.EUR").isEqualTo(0.9235);
+                .jsonPath("$.rates.EUR").isEqualTo(0.9235f);
     }
 
     @Test
     void getRates_includesCacheControlHeader() {
-        when(currencyService.fetchRates()).thenReturn(SAMPLE_RESPONSE);
+        when(currencyService.fetchRates()).thenReturn(new RatesFetchResult(SAMPLE_RESPONSE, false));
 
         restTestClient.get().uri("/api/rates")
                 .exchange()
                 .expectStatus().isOk()
-                .expectHeader().valueEquals(HttpHeaders.CACHE_CONTROL, "public, max-age=300");
+                .expectHeader().valueEquals(HttpHeaders.CACHE_CONTROL, "public, max-age=300, stale-if-error=86400");
     }
 
     @Test
-    void getRates_returns503WhenUpstreamFails() {
+    void getRates_doesNotIncludeStaleHeaderWhenFresh() {
+        when(currencyService.fetchRates()).thenReturn(new RatesFetchResult(SAMPLE_RESPONSE, false));
+
+        restTestClient.get().uri("/api/rates")
+                .exchange()
+                .expectStatus().isOk()
+                .expectHeader().doesNotExist(CurrencyController.HEADER_RATES_STALE);
+    }
+
+    @Test
+    void getRates_includesStaleHeaderWhenServingCachedRates() {
+        when(currencyService.fetchRates()).thenReturn(new RatesFetchResult(SAMPLE_RESPONSE, true));
+
+        restTestClient.get().uri("/api/rates")
+                .exchange()
+                .expectStatus().isOk()
+                .expectHeader().valueEquals(CurrencyController.HEADER_RATES_STALE, "true");
+    }
+
+    @Test
+    void getRates_returns503WhenUpstreamFailsAndCacheEmpty() {
         when(currencyService.fetchRates())
                 .thenThrow(new ExternalApiException("Upstream returned HTTP 500", 500));
 
