@@ -1,15 +1,11 @@
 package com.unstampedpages.currencyservice.model;
 
-import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
-
 import java.math.BigDecimal;
 import java.util.Map;
 
 /**
- * Represents the JSON envelope returned by allratestoday.com.
- * Unknown fields are ignored to remain tolerant of future API additions.
+ * Response returned by this service's /api/rates endpoint.
  */
-@JsonIgnoreProperties(ignoreUnknown = true)
 public record CurrencyRatesResponse(
         Boolean success,
         String source,

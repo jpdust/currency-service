@@ -7,6 +7,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.MediaType;
+import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestClient;
 
 import static com.github.tomakehurst.wiremock.client.WireMock.*;
@@ -23,34 +24,31 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  */
 class CurrencyServiceTest {
 
-    private static final String MOCK_RATES_JSON = """
-            {
-              "success": true,
-              "source": "USD",
-              "date": "2024-11-15",
-              "rates": {
-                "EUR": 0.9235,
-                "GBP": 0.7885,
-                "JPY": 154.32,
-                "CAD": 1.3956
-              }
-            }
+    private static final String RATES_ARRAY_JSON = """
+            [
+              {"rate": 0.9235, "source": "USD", "target": "EUR", "time": "2026-06-09T04:33:00+0000"},
+              {"rate": 0.7885, "source": "USD", "target": "GBP", "time": "2026-06-09T04:33:00+0000"},
+              {"rate": 154.32, "source": "USD", "target": "JPY", "time": "2026-06-09T04:33:00+0000"}
+            ]
             """;
+
+    private static final String EMPTY_ARRAY_JSON = "[]";
 
     private WireMockServer wireMockServer;
     private CurrencyService currencyService;
+    private CurrencyApiProperties props;
 
     @BeforeEach
     void setUp() {
         wireMockServer = new WireMockServer(wireMockConfig().dynamicPort());
         wireMockServer.start();
 
-        var props = new CurrencyApiProperties(
-                wireMockServer.baseUrl(),   // base-url → WireMock
-                "/api/v1/rates",            // path
-                "test-api-key",             // key
-                "USD",                      // source
-                300                         // cache-max-age (not used in service layer)
+        props = new CurrencyApiProperties(
+                wireMockServer.baseUrl(),
+                "/api/v1/rates",
+                "test-api-key",
+                "USD",
+                300
         );
 
         RestClient restClient = RestClient.builder()
@@ -69,39 +67,87 @@ class CurrencyServiceTest {
     void fetchRates_returnsDeserializedResponse() {
         wireMockServer.stubFor(
                 get(urlPathEqualTo("/api/v1/rates"))
-                        .withQueryParam("source", equalTo("USD"))
-                        .withQueryParam("apikey", equalTo("test-api-key"))
                         .willReturn(aResponse()
                                 .withStatus(200)
                                 .withHeader("Content-Type", MediaType.APPLICATION_JSON_VALUE)
-                                .withBody(MOCK_RATES_JSON))
+                                .withBody(RATES_ARRAY_JSON))
         );
 
         var result = currencyService.fetchRates();
 
-        assertThat(result).isNotNull();
         assertThat(result.success()).isTrue();
         assertThat(result.source()).isEqualTo("USD");
-        assertThat(result.date()).isEqualTo("2024-11-15");
-        assertThat(result.rates()).containsKey("EUR");
+        assertThat(result.date()).isEqualTo("2026-06-09T04:33:00+0000");
+        assertThat(result.rates()).hasSize(3);
         assertThat(result.rates().get("EUR")).isEqualByComparingTo("0.9235");
+        assertThat(result.rates().get("GBP")).isEqualByComparingTo("0.7885");
+        assertThat(result.rates().get("JPY")).isEqualByComparingTo("154.32");
     }
 
     @Test
-    void fetchRates_appendsApiKeyAndSourceAsQueryParams() {
+    void fetchRates_sendsAuthorizationBearerHeader() {
         wireMockServer.stubFor(
                 get(urlPathEqualTo("/api/v1/rates"))
                         .willReturn(aResponse()
                                 .withStatus(200)
                                 .withHeader("Content-Type", MediaType.APPLICATION_JSON_VALUE)
-                                .withBody(MOCK_RATES_JSON))
+                                .withBody(RATES_ARRAY_JSON))
         );
 
         currencyService.fetchRates();
 
         wireMockServer.verify(getRequestedFor(urlPathEqualTo("/api/v1/rates"))
-                .withQueryParam("source", equalTo("USD"))
-                .withQueryParam("apikey", equalTo("test-api-key")));
+                .withHeader("Authorization", equalTo("Bearer test-api-key")));
+    }
+
+    @Test
+    void fetchRates_sendsSourceQueryParam() {
+        wireMockServer.stubFor(
+                get(urlPathEqualTo("/api/v1/rates"))
+                        .willReturn(aResponse()
+                                .withStatus(200)
+                                .withHeader("Content-Type", MediaType.APPLICATION_JSON_VALUE)
+                                .withBody(RATES_ARRAY_JSON))
+        );
+
+        currencyService.fetchRates();
+
+        wireMockServer.verify(getRequestedFor(urlPathEqualTo("/api/v1/rates"))
+                .withQueryParam("source", equalTo("USD")));
+    }
+
+    @Test
+    void fetchRates_doesNotSendApiKeyAsQueryParam() {
+        wireMockServer.stubFor(
+                get(urlPathEqualTo("/api/v1/rates"))
+                        .willReturn(aResponse()
+                                .withStatus(200)
+                                .withHeader("Content-Type", MediaType.APPLICATION_JSON_VALUE)
+                                .withBody(RATES_ARRAY_JSON))
+        );
+
+        currencyService.fetchRates();
+
+        wireMockServer.verify(getRequestedFor(urlPathEqualTo("/api/v1/rates"))
+                .withoutQueryParam("apikey"));
+    }
+
+    @Test
+    void fetchRates_emptyUpstreamList_fallsBackToConfiguredSource() {
+        wireMockServer.stubFor(
+                get(urlPathEqualTo("/api/v1/rates"))
+                        .willReturn(aResponse()
+                                .withStatus(200)
+                                .withHeader("Content-Type", MediaType.APPLICATION_JSON_VALUE)
+                                .withBody(EMPTY_ARRAY_JSON))
+        );
+
+        var result = currencyService.fetchRates();
+
+        assertThat(result.success()).isTrue();
+        assertThat(result.source()).isEqualTo("USD");
+        assertThat(result.date()).isNull();
+        assertThat(result.rates()).isEmpty();
     }
 
     @Test
@@ -127,5 +173,13 @@ class CurrencyServiceTest {
                 .isInstanceOf(ExternalApiException.class)
                 .extracting(t -> ((ExternalApiException) t).getStatusCode())
                 .isEqualTo(401);
+    }
+
+    @Test
+    void fetchRates_throwsResourceAccessExceptionOnNetworkFailure() {
+        wireMockServer.stop();
+
+        assertThatThrownBy(() -> currencyService.fetchRates())
+                .isInstanceOf(ResourceAccessException.class);
     }
 }
