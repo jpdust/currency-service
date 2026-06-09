@@ -14,5 +14,6 @@ public record CurrencyApiProperties(
         String path,
         String key,
         String source,
-        int cacheMaxAge
+        int cacheMaxAge,
+        int staleIfError
 ) {}

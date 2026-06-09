@@ -59,7 +59,12 @@ Resources:
         Comment: >
           Cache policy for GET /api/rates.
           MinTTL=300s enforces caching even if the origin omits Cache-Control.
-          MaxTTL=86400s (24 h) caps stale-while-revalidate scenarios.
+          MaxTTL=86400s (24 h) caps the normal freshness window.
+          The origin emits Cache-Control: public, max-age=300, stale-if-error=86400.
+          stale-if-error instructs CloudFront to serve its cached copy for up to 24 h
+          when the origin returns a 5xx or is unreachable — no Lambda@Edge required.
+          X-Rates-Stale response headers from the origin pass through to viewers
+          automatically (no ResponseHeadersPolicy needed).
           Cache key is path-only — no query strings, cookies, or custom headers.
         DefaultTTL: 300    # Used when origin does not send Cache-Control
         MinTTL: 300        # CloudFront will not cache for less than 5 minutes
