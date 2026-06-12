@@ -12,7 +12,7 @@ Parameters:
   ApiGatewayDomainName:
     Type: String
     Description: >
-      API Gateway execute-API hostname, e.g.
+      HTTP API (v2) execute-API hostname, e.g.
       abc123def.execute-api.us-east-1.amazonaws.com
     AllowedPattern: "^[a-z0-9]+\\.execute-api\\.[a-z0-9-]+\\.amazonaws\\.com$"
     ConstraintDescription: Must be a valid API Gateway domain name.
