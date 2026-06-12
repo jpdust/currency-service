@@ -28,15 +28,25 @@ import java.io.OutputStream;
  */
 public class StreamLambdaHandler implements RequestStreamHandler {
 
-    private static final SpringBootLambdaContainerHandler<HttpApiV2ProxyRequest, AwsProxyResponse> handler;
+    @FunctionalInterface
+    interface HandlerFactory {
+        SpringBootLambdaContainerHandler<HttpApiV2ProxyRequest, AwsProxyResponse> create()
+                throws ContainerInitializationException;
+    }
+
+    private static SpringBootLambdaContainerHandler<HttpApiV2ProxyRequest, AwsProxyResponse> handler;
 
     static {
+        handler = initHandler(() -> new SpringBootProxyHandlerBuilder<HttpApiV2ProxyRequest>()
+                .defaultHttpApiV2Proxy()
+                .servletApplication()
+                .springBootApplication(CurrencyServiceApplication.class)
+                .buildAndInitialize());
+    }
+
+    static SpringBootLambdaContainerHandler<HttpApiV2ProxyRequest, AwsProxyResponse> initHandler(HandlerFactory factory) {
         try {
-            handler = new SpringBootProxyHandlerBuilder<HttpApiV2ProxyRequest>()
-                    .defaultHttpApiV2Proxy()
-                    .servletApplication()
-                    .springBootApplication(CurrencyServiceApplication.class)
-                    .buildAndInitialize();
+            return factory.create();
         } catch (ContainerInitializationException e) {
             throw new RuntimeException("Failed to initialize Spring Boot application", e);
         }
