@@ -1,6 +1,6 @@
 # Currency Service
 
-A Spring Boot 4 microservice that fetches live USD exchange rates from [allratestoday.com](https://allratestoday.com) and exposes them via a single REST endpoint. Responses are cache-annotated for distribution through an Amazon CloudFront edge network, keeping upstream API calls to a minimum.
+A Spring Boot 4 microservice that fetches live USD exchange rates from [allratestoday.com](https://allratestoday.com) and exposes them via a single REST endpoint. The service runs as an **AWS Lambda function** fronted by API Gateway and Amazon CloudFront, keeping operational overhead to a minimum and upstream API calls low through edge caching.
 
 ---
 
@@ -31,11 +31,16 @@ Browser / API Consumer
          │ cache miss only
          ▼
 ┌───────────────────┐
-│   API Gateway     │  HTTPS origin
+│   API Gateway     │  HTTPS origin (HTTP API v2)
+│   (HTTP API v2)   │
 └────────┬──────────┘
-         │
+         │ proxy event
          ▼
 ┌─────────────────────────────────────────────┐
+│        AWS Lambda (shadow JAR)              │
+│   StreamLambdaHandler (RequestStreamHandler)│
+│       │  aws-serverless-java-container      │
+│       ▼                                     │
 │           Currency Service (Spring Boot)     │
 │                                             │
 │  GET /api/rates                             │
@@ -53,9 +58,10 @@ Browser / API Consumer
 
 1. A consumer requests `GET /api/rates` through the CloudFront distribution.
 2. CloudFront serves a cached response if one exists and is within its TTL.
-3. On a cache miss, CloudFront forwards the request through API Gateway to the Spring Boot service.
-4. The service calls the upstream currency API, attaches a `Cache-Control: public, max-age=300` header, and returns the response.
-5. CloudFront caches the response at the edge for subsequent requests.
+3. On a cache miss, CloudFront forwards the request through API Gateway (HTTP API v2) to the Lambda function.
+4. `StreamLambdaHandler` translates the API Gateway proxy event into a Servlet request and hands it to the Spring Boot application context.
+5. The service calls the upstream currency API, attaches a `Cache-Control: public, max-age=300` header, and returns the response.
+6. CloudFront caches the response at the edge for subsequent requests.
 
 ---
 
@@ -69,9 +75,14 @@ Browser / API Consumer
 | HTTP client | `RestClient` (Spring Framework 7) |
 | JSON | Jackson 3 (`tools.jackson.core:jackson-databind`) |
 | Build tool | Gradle 9.5 (Kotlin DSL) |
+| Lambda runtime | `aws-serverless-java-container-springboot4:3.0.1` |
+| Lambda handler | `StreamLambdaHandler` (`RequestStreamHandler`) |
+| Lambda package | Shadow JAR (`com.gradleup.shadow` 8.3.6) |
 | Test framework | JUnit 5, Mockito, WireMock 3.9.1 |
 | Test client | `RestTestClient` (Spring Framework 7) |
 | Observability | Spring Boot Actuator (`/actuator/health`, `/actuator/info`) |
+| Compute | AWS Lambda |
+| API layer | Amazon API Gateway (HTTP API v2) |
 | CDN | Amazon CloudFront |
 | Infrastructure-as-code | AWS CloudFormation |
 | Upstream API | [allratestoday.com](https://allratestoday.com) |
@@ -90,7 +101,8 @@ currency-service/
 └── src/
     ├── main/
     │   ├── java/com/unstampedpages/currencyservice/
-    │   │   ├── CurrencyServiceApplication.java     # Entry point
+    │   │   ├── CurrencyServiceApplication.java     # Spring Boot entry point
+    │   │   ├── StreamLambdaHandler.java            # AWS Lambda entry point (RequestStreamHandler)
     │   │   ├── config/
     │   │   │   ├── CurrencyApiProperties.java       # Typed @ConfigurationProperties
     │   │   │   └── RestClientConfig.java            # RestClient bean
@@ -134,7 +146,7 @@ All properties are under the `currency.api` prefix.
 
 ### Supplying the API key
 
-**Production** — set the `CURRENCY_API_KEY` environment variable. Spring's relaxed binding maps it to `currency.api.key` automatically.
+**Production (Lambda)** — set the `CURRENCY_API_KEY` environment variable on the Lambda function. Spring's relaxed binding maps it to `currency.api.key` automatically.
 
 **Local development** — copy `local.properties.example` to `local.properties` and fill in the key:
 
@@ -162,7 +174,7 @@ cp local.properties.example local.properties
 
 The service starts on **http://localhost:8080**.
 
-### Build a deployable JAR
+### Build a deployable JAR (local / traditional)
 
 ```bash
 ./gradlew bootJar
@@ -170,10 +182,26 @@ The service starts on **http://localhost:8080**.
 
 The fat JAR is written to `build/libs/currency-service-0.0.1-SNAPSHOT.jar`.
 
-### Run the JAR (production-style)
+### Run the JAR (local production-style)
 
 ```bash
 CURRENCY_API_KEY=your_key java -jar build/libs/currency-service-0.0.1-SNAPSHOT.jar
+```
+
+### Build the Lambda deployment package
+
+The Lambda function requires a shadow JAR that merges Spring auto-configuration service files and strips the `META-INF/versions/` Multi-Release JAR structure that Lambda's zip unpacker cannot handle.
+
+```bash
+./gradlew shadowJar
+```
+
+The shadow JAR is written to `build/libs/currency-service-0.0.1-SNAPSHOT-all.jar`. Upload this file to Lambda — **not** the `bootJar` output.
+
+**Lambda handler string:**
+
+```
+com.unstampedpages.currencyservice.StreamLambdaHandler::handleRequest
 ```
 
 ### Run tests
@@ -266,6 +294,14 @@ The test suite has **22 tests across 5 classes** with no external dependencies a
 ---
 
 ## AWS Infrastructure
+
+The service runs fully serverless on AWS. The full stack is:
+
+| Layer | Service | Notes |
+|---|---|---|
+| CDN | Amazon CloudFront | Edge cache, HTTPS enforcement |
+| API layer | Amazon API Gateway (HTTP API v2) | Routes requests to Lambda |
+| Compute | AWS Lambda | Runs the Spring Boot app via `StreamLambdaHandler` |
 
 The CloudFormation template at `infrastructure/cloudfront.yaml` provisions:
 
